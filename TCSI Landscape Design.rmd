@@ -1,0 +1,1251 @@
+---
+title: "Code for Going Slow to Go Fast: Landscape Designs to Achieve Multiple Benefits"
+author: "Liraz Bistritz, Nicholas Povak"
+date: "2025-04-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(terra)
+library(raster)
+library(sf)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(whitebox)
+```
+
+```{r}
+wbt_init("~/whitebox_tools.exe") #Initialize 'WhiteboxTools' #the dir where whitebox tools is located (https://github.com/tsuga11/whitebox-tools)
+```
+
+#Layers needed for the analysis:
+```{r}
+dir <- "~/" #set directory where the data layers are located
+
+#the study area:
+TCSI_boundary <- rast(paste0(dir, "TCSI_boundary_binary.tif"))
+TCSI_boundary <- ifel(TCSI_boundary == 1, 1, NA)
+
+#forest mask for TCSI
+TCSI_forest <- rast(paste0(dir, "TCSI forest mask.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+#urban areas mask:
+urban <- rast(paste0(dir,"urban_TCSI_binary.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+urban <- ifel(urban == 1, NA, 1)
+
+#POD boundaries:
+PODS <- rast(paste0(dir,"PODs_interior_TCSI_r.tif")) %>%
+  terra::project(TCSI_forest, method = "near") %>%
+  terra::crop(TCSI_forest)
+
+#HUC12 watersheds:
+HUC12 <- rast(paste0(dir, "HUC12_TCSI_r.tif")) %>%
+  terra::project(TCSI_forest, method = "near") %>%
+  terra::crop(TCSI_forest)
+HUC12 <- ifel(HUC12 == 0, NA, HUC12)
+
+```
+
+#The areas selected for treatment by the optimization model ForSys, in the fire and the ecosystem scenarios:
+```{r}
+#fire scenario:
+#50% level:
+fire50 <- rast(paste0(dir, "fire50 treatment.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+#75% level:
+fire75 <- rast(paste0(dir, "fire75 treatment.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+
+#ecosystem scenario:
+#50% level:
+eco50 <- rast(paste0(dir, "ecosystem50 treatment.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+#75% level:
+eco75 <- rast(paste0(dir, "ecosystem75 treatment.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+```
+
+#Updating metric scores post treatmemt:#
+#The metrics:
+```{r}
+td <- rast(paste0(dir,"tree density current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #tree density
+
+ht <- rast(paste0(dir,"structural heterogeneity current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #heterogeneity
+
+ba <- rast(paste0(dir,"basal area current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #basal area
+
+dd <- rast(paste0(dir,"disturbance delinquency current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #disturbance delinquency
+
+DRID <- rast(paste0(dir,"disturbance return interval departure current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #disturbance return interval departure
+
+fac_lsp <- rast(paste0(dir,"probability of low severity fire current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #low severity probability, fire adapted communities
+
+carbonstability <- rast(paste0(dir,"total carbon current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #total carbon
+
+hsf_prob <- rast(paste0(dir,"probability of high severity fire current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #2B1 probability of high severity fire
+
+hsf_patch <- rast(paste0(dir,"probability of high severity patch size current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #2B2 probability of large high severity fire patch
+```
+
+#Updating metric scores post treatment, fire scenario:
+```{r}
+##in treated areas:
+ #tree density turns to 1                  td
+ #low sev turns to 1                       fac_lsp
+ #HS fire turns to 1 (corr > 0.7)          hsf_prob
+ #dd turns to 1
+ #carbon downgrades -0.3 to -0.7 rule      carbonstability
+ #basal area  downgrade -0.3 to -0.7 rule  basal_area
+ #hs patch size upgrade 0.3-0.7 rule       hsf_patch
+ #DRID upgraded  0.3-0.7
+
+#The full rule set by which scores were updated is described in table 3
+
+#tree density, 50% and 75% levels:
+td_fire50 <- ifel(fire50 == 1, 1, td)
+p_td_fire50 <- ifel(td_fire50 != td, 1, 0)
+p_td_fire50 <- zonal(p_td_fire50, TCSI_boundary, "mean", na.rm=T)
+p_td_fire50
+
+td_fire75 <- ifel(fire75 == 1, 1, td)
+p_td_fire75 <- ifel(td_fire75 != td, 1, 0)
+p_td_fire75 <- zonal(p_td_fire75, TCSI_boundary, "mean", na.rm=T)
+p_td_fire75
+
+#low severity probability, fire adapted communities, 50% and 75% levels:
+fac_lsp_fire50 <- ifel(fire50 == 1, 1, fac_lsp)
+p_fac_lsp_fire50 <- ifel(fac_lsp_fire50 != fac_lsp, 1, 0)
+p_fac_lsp_fire50 <- zonal(p_fac_lsp_fire50, TCSI_boundary, "mean", na.rm=T)
+p_fac_lsp_fire50
+
+fac_lsp_fire75 <- ifel(fire75 == 1, 1, fac_lsp)
+p_fac_lsp_fire75 <- ifel(fac_lsp_fire75 != fac_lsp, 1, 0)
+p_fac_lsp_fire75 <- zonal(p_fac_lsp_fire75, TCSI_boundary, "mean", na.rm=T)
+p_fac_lsp_fire75
+
+#disturbance delinquency, 50% and 75% levels:
+dd_fire50 <- ifel(fire50 == 1, 1, dd)
+p_dd_fire50 <- ifel(dd_fire50 != dd, 1, 0)
+p_dd_fire50 <- zonal(p_dd_fire50, TCSI_boundary, "mean", na.rm=T)
+p_dd_fire50
+
+dd_fire75 <- ifel(fire75 == 1, 1, dd)
+p_dd_fire75 <- ifel(dd_fire75 != dd, 1, 0)
+p_dd_fire75 <- zonal(p_dd_fire75, TCSI_boundary, "mean", na.rm=T)
+p_dd_fire75
+
+#probability of high severity fire, 50% and 75% levels:
+hsf_prob_fire50 <- ifel(fire50 == 1, 1, hsf_prob)
+p_hsf_prob_fire50 <- ifel(hsf_prob_fire50 != hsf_prob, 1, 0)
+p_hsf_prob_fire50 <- zonal(p_hsf_prob_fire50, TCSI_boundary, "mean", na.rm=T)
+p_hsf_prob_fire50
+
+hsf_prob_fire75 <- ifel(fire75 == 1, 1, hsf_prob)
+p_hsf_prob_fire75 <- ifel(hsf_prob_fire75 != hsf_prob, 1, 0)
+p_hsf_prob_fire75 <- zonal(p_hsf_prob_fire75, TCSI_boundary, "mean", na.rm=T)
+p_hsf_prob_fire75
+
+#toal carbon, 50% and 75% levels:
+carbonstability_fire50 <- ifel(fire50 == 1 & carbonstability <= -0.5, -1, carbonstability)
+carbonstability_fire50 <- ifel(fire50 == 1 & carbonstability_fire50 < 0 & carbonstability_fire50 > -0.5, -0.5, carbonstability_fire50)
+carbonstability_fire50 <- ifel(fire50 == 1 & carbonstability_fire50 >= 0 , 0, carbonstability_fire50)
+
+p1_c_fire50 <- ifel(carbonstability_fire50 == -1 & carbonstability != -1, 1, 0)
+p1_c_fire50 <- zonal(p1_c_fire50, TCSI_boundary, "mean", na.rm=T)
+p1_c_fire50
+p2_c_fire50 <- ifel(carbonstability_fire50 == -0.5 & carbonstability != -0.5, 1, 0)
+p2_c_fire50 <- zonal(p2_c_fire50, TCSI_boundary, "mean", na.rm=T)
+p2_c_fire50
+p3_c_fire50 <- ifel(carbonstability_fire50 == 0 & carbonstability != 0, 1, 0)
+p3_c_fire50 <- zonal(p3_c_fire50, TCSI_boundary, "mean", na.rm=T)
+p3_c_fire50
+
+carbonstability_fire75 <- ifel(fire75 == 1 & carbonstability <= -0.5, -1, carbonstability)
+carbonstability_fire75 <- ifel(fire75 == 1 & carbonstability_fire75 < 0 & carbonstability_fire75 > -0.5, -0.5, carbonstability_fire75)
+carbonstability_fire75 <- ifel(fire75 == 1 & carbonstability_fire75 >= 0 , 0, carbonstability_fire75)
+
+p1_c_fire75 <- ifel(carbonstability_fire75 == -1 & carbonstability != -1, 1, 0)
+p1_c_fire75 <- zonal(p1_c_fire75, TCSI_boundary, "mean", na.rm=T)
+p1_c_fire75
+p2_c_fire75 <- ifel(carbonstability_fire75 == -0.5 & carbonstability != -0.5, 1, 0)
+p2_c_fire75 <- zonal(p2_c_fire75, TCSI_boundary, "mean", na.rm=T)
+p2_c_fire75
+p3_c_fire75 <- ifel(carbonstability_fire75 == 0 & carbonstability != 0, 1, 0)
+p3_c_fire75 <- zonal(p3_c_fire75, TCSI_boundary, "mean", na.rm=T)
+p3_c_fire75
+
+#basal area, 50% and 75% levels:
+ba_fire50 <- ifel(fire50 == 1 & ba <= -0.5, -1, ba)
+ba_fire50 <- ifel(fire50 == 1 & ba_fire50 < 0 & ba_fire50 > -0.5, -0.5, ba_fire50)
+ba_fire50 <- ifel(fire50 == 1 & ba_fire50 >= 0 , 0, ba_fire50)
+
+p1_ba_fire50 <- ifel(ba_fire50 == -1 & ba != -1, 1, 0)
+p1_ba_fire50 <- zonal(p1_ba_fire50, TCSI_boundary, "mean", na.rm=T)
+p1_ba_fire50
+p2_ba_fire50 <- ifel(ba_fire50 == -0.5 & ba != -0.5, 1, 0)
+p2_ba_fire50 <- zonal(p2_ba_fire50, TCSI_boundary, "mean", na.rm=T)
+p2_ba_fire50
+p3_ba_fire50 <- ifel(ba_fire50 == 0 & ba != 0, 1, 0)
+p3_ba_fire50 <- zonal(p3_ba_fire50, TCSI_boundary, "mean", na.rm=T)
+p3_ba_fire50
+
+ba_fire75 <- ifel(fire75 == 1 & ba <= -0.5, -1, ba)
+ba_fire75 <- ifel(fire75 == 1 & ba_fire75 < 0 & ba_fire75 > -0.5, -0.5, ba_fire75)
+ba_fire75 <- ifel(fire75 == 1 & ba_fire75 >= 0 , 0, ba_fire75)
+
+p1_ba_fire75 <- ifel(ba_fire75 == -1 & ba != -1, 1, 0)
+p1_ba_fire75 <- zonal(p1_ba_fire75, TCSI_boundary, "mean", na.rm=T)
+p1_ba_fire75
+p2_ba_fire75 <- ifel(ba_fire75 == -0.5 & ba != -0.5, 1, 0)
+p2_ba_fire75 <- zonal(p2_ba_fire75, TCSI_boundary, "mean", na.rm=T)
+p2_ba_fire75
+p3_ba_fire75 <- ifel(ba_fire75 == 0 & ba != 0, 1, 0)
+p3_ba_fire75 <- zonal(p3_ba_fire75, TCSI_boundary, "mean", na.rm=T)
+p3_ba_fire75
+
+#probability of large high severity fire patch, 50% and 75% levels:
+hsf_patch_fire50 <- ifel(fire50 == 1 & hsf_patch <= 0, 0, hsf_patch)
+hsf_patch_fire50 <- ifel(fire50 == 1 & hsf_patch_fire50 >= 0.5, 1, hsf_patch_fire50)
+hsf_patch_fire50 <- ifel(fire50 == 1 & hsf_patch_fire50 < 0.5 & hsf_patch_fire50 > 0, 0.5, hsf_patch_fire50)
+
+p1_hsf_patch_fire50 <- ifel(hsf_patch_fire50 == 0 & hsf_patch != 0, 1, 0)
+p1_hsf_patch_fire50 <- zonal(p1_hsf_patch_fire50, TCSI_boundary, "mean", na.rm=T)
+p1_hsf_patch_fire50
+p2_hsf_patch_fire50 <- ifel(hsf_patch_fire50 == 1 & hsf_patch != 1, 1, 0)
+p2_hsf_patch_fire50 <- zonal(p2_hsf_patch_fire50, TCSI_boundary, "mean", na.rm=T)
+p2_hsf_patch_fire50
+p3_hsf_patch_fire50 <- ifel(hsf_patch_fire50 == 0.5 & hsf_patch != 0.5, 1, 0)
+p3_hsf_patch_fire50 <- zonal(p3_hsf_patch_fire50, TCSI_boundary, "mean", na.rm=T)
+p3_hsf_patch_fire50
+
+hsf_patch_fire75 <- ifel(fire75 == 1 & hsf_patch <= 0, 0, hsf_patch)
+hsf_patch_fire75 <- ifel(fire75 == 1 & hsf_patch_fire75 >= 0.5, 1, hsf_patch_fire75)
+hsf_patch_fire75 <- ifel(fire75 == 1 & hsf_patch_fire75 < 0.5 & hsf_patch_fire75 > 0, 0.5, hsf_patch_fire75)
+
+p1_hsf_patch_fire75 <- ifel(hsf_patch_fire75 == 0 & hsf_patch != 0, 1, 0)
+p1_hsf_patch_fire75 <- zonal(p1_hsf_patch_fire75, TCSI_boundary, "mean", na.rm=T)
+p1_hsf_patch_fire75
+p2_hsf_patch_fire75 <- ifel(hsf_patch_fire75 == 1 & hsf_patch != 1, 1, 0)
+p2_hsf_patch_fire75 <- zonal(p2_hsf_patch_fire75, TCSI_boundary, "mean", na.rm=T)
+p2_hsf_patch_fire75
+p3_hsf_patch_fire75 <- ifel(hsf_patch_fire75 == 0.5 & hsf_patch != 0.5, 1, 0)
+p3_hsf_patch_fire75 <- zonal(p3_hsf_patch_fire75, TCSI_boundary, "mean", na.rm=T)
+p3_hsf_patch_fire75
+
+#disturbance return interval departure, 50% and 75% levels:
+DRID_fire50 <- ifel(fire50 == 1 & DRID < -0.5, -0.5, DRID)
+DRID_fire50 <- ifel(fire50 == 1 & DRID_fire50 > -0.5 & DRID_fire50 < 0, 0, DRID_fire50)
+DRID_fire50 <- ifel(fire50 == 1 & DRID_fire50 >= 0.5, 1, DRID_fire50)
+DRID_fire50 <- ifel(fire50 == 1 & DRID_fire50 < 0.5 & DRID_fire50 > 0, 0.5, DRID_fire50)
+
+p0_DRID_fire50 <- ifel(DRID_fire50 == -0.5 & DRID != -0.5, 1, 0)
+p0_DRID_fire50 <- zonal(p0_DRID_fire50, TCSI_boundary, "mean", na.rm=T)
+p0_DRID_fire50
+p1_DRID_fire50 <- ifel(DRID_fire50 == 0 & DRID != 0, 1, 0)
+p1_DRID_fire50 <- zonal(p1_DRID_fire50, TCSI_boundary, "mean", na.rm=T)
+p1_DRID_fire50
+p2_DRID_fire50 <- ifel(DRID_fire50 == 1 & DRID != 1, 1, 0)
+p2_DRID_fire50 <- zonal(p2_DRID_fire50, TCSI_boundary, "mean", na.rm=T)
+p2_DRID_fire50
+p3_DRID_fire50 <- ifel(DRID_fire50 == 0.5 & DRID != 0.5, 1, 0)
+p3_DRID_fire50 <- zonal(p3_DRID_fire50, TCSI_boundary, "mean", na.rm=T)
+p3_DRID_fire50
+
+DRID_fire75 <- ifel(fire75 == 1 & DRID < -0.5, -0.5, DRID)
+DRID_fire75 <- ifel(fire75 == 1 & DRID_fire75 > -0.5 & DRID_fire75 < 0, 0, DRID_fire75)
+DRID_fire75 <- ifel(fire75 == 1 & DRID_fire75 >= 0.5, 1, DRID_fire75)
+DRID_fire75 <- ifel(fire75 == 1 & DRID_fire75 < 0.5 & DRID_fire75 > 0, 0.5, DRID_fire75)
+
+p0_DRID_fire75 <- ifel(DRID_fire75 == -0.5 & DRID != -0.5, 1, 0)
+p0_DRID_fire75 <- zonal(p0_DRID_fire75, TCSI_boundary, "mean", na.rm=T)
+p0_DRID_fire75
+p1_DRID_fire75 <- ifel(DRID_fire75 == 0 & DRID != 0, 1, 0)
+p1_DRID_fire75 <- zonal(p1_DRID_fire75, TCSI_boundary, "mean", na.rm=T)
+p1_DRID_fire75
+p2_DRID_fire75 <- ifel(DRID_fire75 == 1 & DRID != 1, 1, 0)
+p2_DRID_fire75 <- zonal(p2_DRID_fire75, TCSI_boundary, "mean", na.rm=T)
+p2_DRID_fire75
+p3_DRID_fire75 <- ifel(DRID_fire75 == 0.5 & DRID != 0.5, 1, 0)
+p3_DRID_fire75 <- zonal(p3_DRID_fire75, TCSI_boundary, "mean", na.rm=T)
+p3_DRID_fire75
+
+gc()
+
+#* the zonal stat values were used in Table 3S
+```
+
+#Updating metric scores post treatment, ecosystem scenario:
+```{r}
+##in treated areas:
+ #HS fire upgrades                       hsf_prob
+ #td turns to 1                          td
+ #h turns to 1                           h_
+ #low sev upgrades                       fac_lsp
+ #DRID upgrades                          DRID
+ #patch size upgrades                    hsf_patch
+
+#The full rule set by which scores were updated is described in table 3
+
+#tree density, 50% and 75% levels:
+td_eco50 <- ifel(eco50 == 1, 1, td)
+p_td_eco50 <- ifel(td_eco50 != td, 1, 0)
+p_td_eco50 <- zonal(p_td_eco50, TCSI_boundary, "mean", na.rm=T)
+p_td_eco50
+
+td_eco75 <- ifel(eco75 == 1, 1, td)
+p_td_eco75 <- ifel(td_eco75 != td, 1, 0)
+p_td_eco75 <- zonal(p_td_eco75, TCSI_boundary, "mean", na.rm=T)
+p_td_eco75
+
+#heterogeneity, 50% and 75% levels:
+ht_eco50 <- ifel(eco50 == 1, 1, ht) 
+p_eco50 <- ifel(ht_eco50 != ht, 1, 0)
+p_eco50 <- zonal(p_eco50, TCSI_boundary, "mean", na.rm=T)
+p_eco50
+
+ht_eco75 <- ifel(eco75 == 1, 1, ht) 
+p_eco75 <- ifel(ht_eco75 != ht, 1, 0)
+p_eco75 <- zonal(p_eco75, TCSI_boundary, "mean", na.rm=T)
+p_eco75
+
+#disturbance delinquency, 50% and 75% levels:
+dd_eco50 <- ifel(eco50 == 1, 1, dd)
+p_dd_eco50 <- ifel(dd_eco50 != dd, 1, 0)
+p_dd_eco50 <- zonal(p_dd_eco50, TCSI_boundary, "mean", na.rm=T)
+p_dd_eco50
+
+dd_eco75 <- ifel(eco75 == 1, 1, dd)
+p_dd_eco75 <- ifel(dd_eco75 != dd, 1, 0)
+p_dd_eco75 <- zonal(p_dd_eco75, TCSI_boundary, "mean", na.rm=T)
+p_dd_eco75
+
+#low severity probability, fire adapted communities, 50% and 75% levels:
+#fac_lsp was upgraded to 1 within WUI, and outside WUI it was upgraded according to this:
+fac_lsp_eco50 <- ifel(eco50 == 1 & fac_lsp < 0, 0, fac_lsp)
+fac_lsp_eco50 <- ifel(eco50 == 1 & fac_lsp_eco50 >= 0.5, 1, fac_lsp_eco50)
+fac_lsp_eco50 <- ifel(eco50 == 1 & fac_lsp_eco50 < 0.5 & fac_lsp_eco50 > 0, 0.5, fac_lsp_eco50)
+
+p1_fac_lsp_eco50 <- ifel(fac_lsp_eco50 == 0 & fac_lsp != 0, 1, 0)
+p1_fac_lsp_eco50 <- zonal(p1_fac_lsp_eco50, TCSI_boundary, "mean", na.rm=T)
+p1_fac_lsp_eco50
+p2_fac_lsp_eco50 <- ifel(fac_lsp_eco50 == 1 & fac_lsp != 1, 1, 0)
+p2_fac_lsp_eco50 <- zonal(p2_fac_lsp_eco50, TCSI_boundary, "mean", na.rm=T)
+p2_fac_lsp_eco50
+p3_fac_lsp_eco50 <- ifel(fac_lsp_eco50 == 0.5 & fac_lsp != 0.5, 1, 0)
+p3_fac_lsp_eco50 <- zonal(p3_fac_lsp_eco50, TCSI_boundary, "mean", na.rm=T)
+p3_fac_lsp_eco50
+
+fac_lsp_eco75 <- ifel(eco75 == 1 & fac_lsp < 0, 0, fac_lsp)
+fac_lsp_eco75 <- ifel(eco75 == 1 & fac_lsp_eco75 >= 0.5, 1, fac_lsp_eco75)
+fac_lsp_eco75 <- ifel(eco75 == 1 & fac_lsp_eco75 < 0.5 & fac_lsp_eco75 > 0, 0.5, fac_lsp_eco75)
+
+p1_fac_lsp_eco75 <- ifel(fac_lsp_eco75 == 0 & fac_lsp != 0, 1, 0)
+p1_fac_lsp_eco75 <- zonal(p1_fac_lsp_eco75, TCSI_boundary, "mean", na.rm=T)
+p1_fac_lsp_eco75
+p2_fac_lsp_eco75 <- ifel(fac_lsp_eco75 == 1 & fac_lsp != 1, 1, 0)
+p2_fac_lsp_eco75 <- zonal(p2_fac_lsp_eco75, TCSI_boundary, "mean", na.rm=T)
+p2_fac_lsp_eco75
+p3_fac_lsp_eco75 <- ifel(fac_lsp_eco75 == 0.5 & fac_lsp != 0.5, 1, 0)
+p3_fac_lsp_eco75 <- zonal(p3_fac_lsp_eco75, TCSI_boundary, "mean", na.rm=T)
+p3_fac_lsp_eco75
+
+#probability of high severity fire, 50% and 75% levels:
+hsf_prob_eco50 <- ifel(eco50 == 1 & hsf_prob < 0, 0, hsf_prob)
+hsf_prob_eco50 <- ifel(eco50 == 1 & hsf_prob_eco50 >= 0.5, 1, hsf_prob_eco50)
+hsf_prob_eco50 <- ifel(eco50 == 1 & hsf_prob_eco50 < 0.5 & hsf_prob_eco50 > 0, 0.5, hsf_prob_eco50)
+
+p1_hsf_prob_eco50 <- ifel(hsf_prob_eco50 == 0 & hsf_prob != 0, 1, 0)
+p1_hsf_prob_eco50 <- zonal(p1_hsf_prob_eco50, TCSI_boundary, "mean", na.rm=T)
+p1_hsf_prob_eco50
+p2_hsf_prob_eco50 <- ifel(hsf_prob_eco50 == 1 & hsf_prob != 1, 1, 0)
+p2_hsf_prob_eco50 <- zonal(p2_hsf_prob_eco50, TCSI_boundary, "mean", na.rm=T)
+p2_hsf_prob_eco50
+p3_hsf_prob_eco50 <- ifel(hsf_prob_eco50 == 0.5 & hsf_prob != 0.5, 1, 0)
+p3_hsf_prob_eco50 <- zonal(p3_hsf_prob_eco50, TCSI_boundary, "mean", na.rm=T)
+p3_hsf_prob_eco50
+
+hsf_prob_eco75 <- ifel(eco75 == 1 & hsf_prob < 0, 0, hsf_prob)
+hsf_prob_eco75 <- ifel(eco75 == 1 & hsf_prob_eco75 >= 0.5, 1, hsf_prob_eco75)
+hsf_prob_eco75 <- ifel(eco75 == 1 & hsf_prob_eco75 < 0.5 & hsf_prob_eco75 > 0, 0.5, hsf_prob_eco75)
+
+p1_hsf_prob_eco75 <- ifel(hsf_prob_eco75 == 0 & hsf_prob != 0, 1, 0)
+p1_hsf_prob_eco75 <- zonal(p1_hsf_prob_eco75, TCSI_boundary, "mean", na.rm=T)
+p1_hsf_prob_eco75
+p2_hsf_prob_eco75 <- ifel(hsf_prob_eco75 == 1 & hsf_prob != 1, 1, 0)
+p2_hsf_prob_eco75 <- zonal(p2_hsf_prob_eco75, TCSI_boundary, "mean", na.rm=T)
+p2_hsf_prob_eco75
+p3_hsf_prob_eco75 <- ifel(hsf_prob_eco75 == 0.5 & hsf_prob != 0.5, 1, 0)
+p3_hsf_prob_eco75 <- zonal(p3_hsf_prob_eco75, TCSI_boundary, "mean", na.rm=T)
+p3_hsf_prob_eco75
+
+#disturbance return interval departure, 50% and 75% levels:
+DRID_eco50 <- ifel(eco50 == 1 & DRID < -0.5, -0.5, DRID)
+DRID_eco50 <- ifel(eco50 == 1 & DRID_eco50 > -0.5 & DRID_eco50 < 0, 0, DRID_eco50)
+DRID_eco50 <- ifel(eco50 == 1 & DRID_eco50 >= 0.5, 1, DRID_eco50)
+DRID_eco50 <- ifel(eco50 == 1 & DRID_eco50 < 0.5 & DRID_eco50 > 0, 0.5, DRID_eco50)
+
+p0_DRID_eco50 <- ifel(DRID_eco50 == -0.5 & DRID != -0.5, 1, 0)
+p0_DRID_eco50 <- zonal(p0_DRID_eco50, TCSI_boundary, "mean", na.rm=T)
+p0_DRID_eco50
+p1_DRID_eco50 <- ifel(DRID_eco50 == 0 & DRID != 0, 1, 0)
+p1_DRID_eco50 <- zonal(p1_DRID_eco50, TCSI_boundary, "mean", na.rm=T)
+p1_DRID_eco50
+p2_DRID_eco50 <- ifel(DRID_eco50 == 1 & DRID != 1, 1, 0)
+p2_DRID_eco50 <- zonal(p2_DRID_eco50, TCSI_boundary, "mean", na.rm=T)
+p2_DRID_eco50
+p3_DRID_eco50 <- ifel(DRID_eco50 == 0.5 & DRID != 0.5, 1, 0)
+p3_DRID_eco50 <- zonal(p3_DRID_eco50, TCSI_boundary, "mean", na.rm=T)
+p3_DRID_eco50
+
+DRID_eco75 <- ifel(eco75 == 1 & DRID < -0.5, -0.5, DRID)
+DRID_eco75 <- ifel(eco75 == 1 & DRID_eco75 > -0.5 & DRID_eco75 < 0, 0, DRID_eco75)
+DRID_eco75 <- ifel(eco75 == 1 & DRID_eco75 >= 0.5, 1, DRID_eco75)
+DRID_eco75 <- ifel(eco75 == 1 & DRID_eco75 < 0.5 & DRID_eco75 > 0, 0.5, DRID_eco75)
+
+p0_DRID_eco75 <- ifel(DRID_eco75 == -0.5 & DRID != -0.5, 1, 0)
+p0_DRID_eco75 <- zonal(p0_DRID_eco75, TCSI_boundary, "mean", na.rm=T)
+p0_DRID_eco75
+p1_DRID_eco75 <- ifel(DRID_eco75 == 0 & DRID != 0, 1, 0)
+p1_DRID_eco75 <- zonal(p1_DRID_eco75, TCSI_boundary, "mean", na.rm=T)
+p1_DRID_eco75
+p2_DRID_eco75 <- ifel(DRID_eco75 == 1 & DRID != 1, 1, 0)
+p2_DRID_eco75 <- zonal(p2_DRID_eco75, TCSI_boundary, "mean", na.rm=T)
+p2_DRID_eco75
+p3_DRID_eco75 <- ifel(DRID_eco75 == 0.5 & DRID != 0.5, 1, 0)
+p3_DRID_eco75 <- zonal(p3_DRID_eco75, TCSI_boundary, "mean", na.rm=T)
+p3_DRID_eco75
+
+#probability of large high severity fire patch, 50% and 75% levels:
+hsf_patch_eco50 <- ifel(eco50 == 1 & hsf_patch < 0, 0, hsf_patch)
+hsf_patch_eco50 <- ifel(eco50 == 1 & hsf_patch_eco50 >= 0.5, 1, hsf_patch_eco50)
+hsf_patch_eco50 <- ifel(eco50 == 1 & hsf_patch_eco50 < 0.5 & hsf_patch_eco50 > 0, 0.5, hsf_patch_eco50)
+
+p1_hsf_patch_eco50 <- ifel(hsf_patch_eco50 == 0 & hsf_patch != 0, 1, 0)
+p1_hsf_patch_eco50 <- zonal(p1_hsf_patch_eco50, TCSI_boundary, "mean", na.rm=T)
+p1_hsf_patch_eco50
+p2_hsf_patch_eco50 <- ifel(hsf_patch_eco50 == 1 & hsf_patch != 1, 1, 0)
+p2_hsf_patch_eco50 <- zonal(p2_hsf_patch_eco50, TCSI_boundary, "mean", na.rm=T)
+p2_hsf_patch_eco50
+p3_hsf_patch_eco50 <- ifel(hsf_patch_eco50 == 0.5 & hsf_patch != 0.5, 1, 0)
+p3_hsf_patch_eco50 <- zonal(p3_hsf_patch_eco50, TCSI_boundary, "mean", na.rm=T)
+p3_hsf_patch_eco50
+
+hsf_patch_eco75 <- ifel(eco75 == 1 & hsf_patch < 0, 0, hsf_patch)
+hsf_patch_eco75 <- ifel(eco75 == 1 & hsf_patch_eco75 >= 0.5, 1, hsf_patch_eco75)
+hsf_patch_eco75 <- ifel(eco75 == 1 & hsf_patch_eco75 < 0.5 & hsf_patch_eco75 > 0, 0.5, hsf_patch_eco75)
+
+p1_hsf_patch_eco75 <- ifel(hsf_patch_eco75 == 0 & hsf_patch != 0, 1, 0)
+p1_hsf_patch_eco75 <- zonal(p1_hsf_patch_eco75, TCSI_boundary, "mean", na.rm=T)
+p1_hsf_patch_eco75
+p2_hsf_patch_eco75 <- ifel(hsf_patch_eco75 == 1 & hsf_patch != 1, 1, 0)
+p2_hsf_patch_eco75 <- zonal(p2_hsf_patch_eco75, TCSI_boundary, "mean", na.rm=T)
+p2_hsf_patch_eco75
+p3_hsf_patch_eco75 <- ifel(hsf_patch_eco75 == 0.5 & hsf_patch != 0.5, 1, 0)
+p3_hsf_patch_eco75 <- zonal(p3_hsf_patch_eco75, TCSI_boundary, "mean", na.rm=T)
+p3_hsf_patch_eco75
+
+gc()
+
+#* the zonal stat values were used in Table 3S
+```
+
+#Biodiversity metrics were updated post treatment following this methodology:
+In both the Fire and the Ecosystem scenarios, treatments were assumed to directly affect canopy cover and thereby their habitat suitability for wildlife (based on the California Wildlife Habitat Relationships database; CWHR, 2014).
+
+In the Fire scenario, treated areas that had moderate to high canopy cover (>40% canopy cover) were assumed to be reduced to low canopy cover (25-40%) post-treatment, corresponding with the objective of reducing canopy density and understory fuels required to achieve low severity fire effects.
+
+In the Ecosystem scenario, we assumed a more moderate reduction in canopy cover and only for areas with initially high canopy cover (>60%), consistent with the objective of supporting multiple ecosystem services.
+
+
+##PROMOTE:
+#Calculating the final scores, for the pillars. fire, and ecosystem outcomes
+
+#Functions to run first:
+```{r}
+AND <-
+function(values, weights=NA, fullmin=-1, fullmax=1){
+  minscore <- min(values)
+  
+  if(any(is.na(weights)))
+    ave <- mean(values)
+  else
+    ave <- stats::weighted.mean(x=values, w=weights)
+  
+  mindist <- abs(minscore - fullmin)
+  fulldist <- abs(fullmax - fullmin)
+  
+  minscore + (ave - minscore) * (mindist/fulldist)
+}
+
+
+rescale.range <- function(x,
+                          orig.min = NA,
+                          orig.max = NA,
+                          new.min = NA,
+                          new.max = NA){
+  if(is.na(orig.min))
+    a. <- range(x, na.rm = T)[1]
+  else
+    a. <- orig.min
+  if(is.na(orig.max))
+    b. <- range(x, na.rm = T)[2]
+  else
+    b. <- orig.max
+  
+  c. <- new.min
+  d. <- new.max
+  
+  r <- (-(((-b. * c.) + (a. * d.))/(-a. + b.))) + (((-c. + d.) * x)/(-a. + b.))
+  
+  r
+}
+
+departure_func_terra <- function(x, breaks, scores) {
+  
+  soe <- rep(NA, length(x))
+  
+  brks <- as.numeric(breaks)
+  tmp <- findInterval(x = x, vec = brks)
+  
+  w <- which((tmp != 0) & (!is.na(x)) & (tmp != length(scores)))
+  
+  mn0 <- brks[tmp[w]]
+  mx0 <- brks[tmp[w] + 1]
+  mn1 <- scores[tmp[w]]
+  mx1 <- scores[tmp[w] + 1]
+  
+  
+  soe[w] <- (-(((-mx0 * mn1) + (mn0 * mx1))/(-mn0 + mx0))) + (((-mn1 + mx1) * x[w])/(-mn0 + mx0))
+  
+  soe[which(tmp == 0)] <- head(scores, 1)
+  soe[which(tmp == length(scores))] <- tail(scores, 1)
+  
+  soe
+}
+```
+
+#Fire outcome scores:
+```{r}
+#since the fire outcome consists of one metric, the FAC score is simply the fac_lsp layer, updated based on the rule set in table 3
+
+#pretreatment score:
+#fac_lsp is low severity probability, fire adapted communities
+zonal(fac_lsp, TCSI_forest, "mean", na.rm=T) #-0.35 #the fire outcome pretreatment score
+
+#fire50 scenario score:
+#the same as in the code above:
+fac_lsp_fire50 <- ifel(fire50 == 1, 1, fac_lsp) #changed to 1 in all treated areas
+zonal(fac_lsp_fire50, TCSI_forest, "mean", na.rm=T) #-0.01
+
+#fire75 scenario score:
+fac_lsp_fire75 <- ifel(fire75 == 1, 1, fac_lsp) #changed to 1 in all treated areas
+zonal(fac_lsp_fire75, TCSI_forest, "mean", na.rm=T) #0.34
+
+#In the ecosystem scenario, inside the WUI, treated areas' scores changed to 1. Outside the WUI, treated areas' scores changed based on the rule set in table 3
+fac_mask <- rast(paste0(dir, "fire adapted communities mask.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #wildland-urban interface (WUI) mask
+
+#eco50 scenario score:
+fac_lsp_eco50_o <- ifel(is.na(fac_mask), fac_lsp_eco50, NA) #keeping only the areas outside the WUI
+fac_lsp_eco50_i <- ifel(eco50 == 1, 1, fac_lsp) #for treated areas inside the WUI, change the score to 1
+fac_lsp_eco50_i <- mask(fac_lsp_eco50_i, fac_mask) #keep only the areas within the WUI
+fac_lsp_eco50 <- ifel(is.na(fac_lsp_eco50_i), fac_lsp_eco50_o, fac_lsp_eco50_i) #this one provides a score of 0.1278046, which is also not the right one. #the problem was that the forest mask was also masked by urban
+zonal(fac_lsp_eco50, TCSI_forest, "mean", na.rm=T) #0.07
+
+#eco75 scenario score:
+fac_lsp_eco75_o <- ifel(is.na(fac_mask), fac_lsp_eco75, NA) #keeping only the areas outside the WUI
+fac_lsp_eco75_i <- ifel(eco75 == 1, 1, fac_lsp) #for treated areas inside the WUI, change the score to 1
+fac_lsp_eco75_i <- mask(fac_lsp_eco75_i, fac_mask) #keep only the areas within the WUI
+fac_lsp_eco75 <- ifel(is.na(fac_lsp_eco75_i), fac_lsp_eco75_o, fac_lsp_eco75_i) #this one provides a score of 0.1278046, which is also not the right one. #the problem was that the forest mask was also masked by urban
+zonal(fac_lsp_eco75, TCSI_forest, "mean", na.rm=T) #0.21
+
+```
+
+#Carbon sequestration pillar scores:
+```{r}
+#pretreatment and in the ecosystem scenario, carbon did not change:
+#pretreatment and ecosystem scenario scores:
+zonal(carbonstability, TCSI_forest, "mean", na.rm=T) #0.11
+carbonstability_eco50 <- carbonstability
+carbonstability_eco75 <- carbonstability
+
+#fire50 scenario score:
+zonal(carbonstability_fire50, TCSI_forest, "mean", na.rm=T) #0.05
+
+#fire75 scenario score:
+zonal(carbonstability_fire75, TCSI_forest, "mean", na.rm=T) #-0.036
+
+```
+
+#Forest resilience pillar scores: (from promote_rerun_20230911 v2.rmd)
+```{r}
+temp_dir <- "~/temp dir" #dir for saving temp outputs
+
+large_td <- rast(paste0(dir,"large_tree_current.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #large tree density
+
+evenness <- rast(paste0(dir, "evenness current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #evenness
+
+seral_stage <- rast(paste0(dir, "seral stage current score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary) #seral stage
+
+huc_12b <- terra::project(x = HUC12, y = TCSI_forest, method = 'near')
+
+#pretreatment score:
+     #forest structure element
+basal_area <- project(ba, TCSI_forest, method = 'near')
+
+tree_density <- project(td, basal_area, method = 'near')
+
+str_cur_15m <- AND(c(tree_density, basal_area))
+
+str_cur_15m_01 <- ifel(str_cur_15m == 1, 1, 0)
+writeRaster(str_cur_15m_01, filename = paste0(temp_dir, '/str_cur_15m_01.tif'), overwrite = T)
+
+    # Structure 180m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_180m.tif'), 
+                    filterx = 13, filtery = 13, verbose_mode = F,
+                    wd = temp_dir)
+    
+str_cur_180m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_180m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+    # Structure 720m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_720m.tif'), 
+                    filterx = 49, filtery = 49)
+    
+str_cur_720m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_720m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+str_cur <- mean(c(str_cur_180m, str_cur_720m), na.rm = T)
+
+fr_e01c <- mean(c(str_cur, large_td, ht), na.rm = T)
+
+     #vegetation composition element:
+fr_e02c <- mean(c(evenness, seral_stage), na.rm = T)
+
+     #disturbance element
+DRID <- crop(DRID, TCSI_forest)
+
+dd <- crop(dd, TCSI_forest)
+
+z_drid_soe <- terra::zonal(x = DRID, 
+                               z = huc_12b, 
+                               fun = mean, na.rm = T)
+z_drid_soe[, 2] <- ifelse(is.nan(z_drid_soe[, 2]), 0, z_drid_soe[, 2])
+z_drid_soe_d <- data.frame(from = z_drid_soe[, 1], 
+                               to = z_drid_soe[, 2])
+drid_huc12_cur <- terra::classify(x = huc_12b, 
+                                      rcl = as.matrix(z_drid_soe_d))
+drid_huc12_cur <- terra::app(drid_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.9793946, -0.6547840), scores = c(-1, 1)))
+
+    # Zonal stats for Delinq
+z_delinq_soe <- terra::zonal(x = dd, 
+                                 z = huc_12b, 
+                                 fun = mean, na.rm = T)
+z_delinq_soe[, 2] <- ifelse(is.nan(z_delinq_soe[, 2]), 0, z_delinq_soe[, 2])
+z_delinq_soe_d <- data.frame(from = z_delinq_soe[, 1], 
+                                 to = z_delinq_soe[, 2])
+delinq_huc12_cur <- terra::classify(x = huc_12b, 
+                                        rcl = as.matrix(z_delinq_soe_d))
+delinq_huc12_cur <- terra::app(delinq_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.3989963, 0.5574752), scores = c(-1, 1)))
+
+    # COMBINE METRICS --> DISTURBANCE ELEMENT
+ dist_cur1 <- mean(c(DRID, dd), na.rm = T)
+ dist_cur2 <- mean(c(drid_huc12_cur, delinq_huc12_cur), na.rm = T)
+ fr_e03c <- mean(c(dist_cur1, dist_cur2), na.rm = T)
+ 
+     #final forest resilience score:
+fr <- mean(c(fr_e01c, fr_e02c, fr_e03c), na.rm = T)
+zonal(fr, TCSI_forest, "mean", na.rm=T)
+
+
+#eco50 scenario score:
+     #forest structure element
+basal_area <- project(ba, TCSI_forest, method = 'near')
+
+tree_density <- project(td_eco50, basal_area, method = 'near')
+
+str_cur_15m <- AND(c(tree_density, basal_area))
+
+str_cur_15m_01 <- ifel(str_cur_15m == 1, 1, 0)
+writeRaster(str_cur_15m_01, filename = paste0(temp_dir, '/str_cur_15m_01.tif'), overwrite = T)
+
+    # Structure 180m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_180m.tif'), 
+                    filterx = 13, filtery = 13, verbose_mode = F,
+                    wd = temp_dir)
+    
+str_cur_180m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_180m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+    # Structure 720m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_720m.tif'), 
+                    filterx = 49, filtery = 49)
+    
+str_cur_720m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_720m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+str_cur <- mean(c(str_cur_180m, str_cur_720m), na.rm = T)
+
+fr_e01c <- mean(c(str_cur, large_td, ht_eco50), na.rm = T)
+
+     #vegetation composition element:
+fr_e02c <- mean(c(evenness, seral_stage), na.rm = T)
+
+     #disturbance element
+DRID_eco50 <- crop(DRID_eco50, TCSI_forest)
+
+dd_eco50 <- crop(dd_eco50, TCSI_forest)
+
+z_drid_soe <- terra::zonal(x = DRID_eco50, 
+                               z = huc_12b, 
+                               fun = mean, na.rm = T)
+z_drid_soe[, 2] <- ifelse(is.nan(z_drid_soe[, 2]), 0, z_drid_soe[, 2])
+z_drid_soe_d <- data.frame(from = z_drid_soe[, 1], 
+                               to = z_drid_soe[, 2])
+drid_huc12_cur <- terra::classify(x = huc_12b, 
+                                      rcl = as.matrix(z_drid_soe_d))
+drid_huc12_cur <- terra::app(drid_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.9793946, -0.6547840), scores = c(-1, 1)))
+
+    # Zonal stats for Delinq
+z_delinq_soe <- terra::zonal(x = dd_eco50, 
+                                 z = huc_12b, 
+                                 fun = mean, na.rm = T)
+z_delinq_soe[, 2] <- ifelse(is.nan(z_delinq_soe[, 2]), 0, z_delinq_soe[, 2])
+z_delinq_soe_d <- data.frame(from = z_delinq_soe[, 1], 
+                                 to = z_delinq_soe[, 2])
+delinq_huc12_cur <- terra::classify(x = huc_12b, 
+                                        rcl = as.matrix(z_delinq_soe_d))
+delinq_huc12_cur <- terra::app(delinq_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.3989963, 0.5574752), scores = c(-1, 1)))
+
+    # COMBINE METRICS --> DISTURBANCE ELEMENT
+ dist_cur1 <- mean(c(DRID_eco50, dd_eco50), na.rm = T)
+ dist_cur2 <- mean(c(drid_huc12_cur, delinq_huc12_cur), na.rm = T)
+ fr_e03c <- mean(c(dist_cur1, dist_cur2), na.rm = T)
+ 
+     #final forest resilience score:
+fr_eco50 <- mean(c(fr_e01c, fr_e02c, fr_e03c), na.rm = T)
+zonal(fr_eco50, TCSI_forest, "mean", na.rm=T)
+
+
+#eco75 scenario score:
+     #forest structure element
+basal_area <- project(ba, TCSI_forest, method = 'near')
+
+tree_density <- project(td_eco75, basal_area, method = 'near')
+
+str_cur_15m <- AND(c(tree_density, basal_area))
+
+str_cur_15m_01 <- ifel(str_cur_15m == 1, 1, 0)
+writeRaster(str_cur_15m_01, filename = paste0(temp_dir, '/str_cur_15m_01.tif'), overwrite = T)
+
+    # Structure 180m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_180m.tif'), 
+                    filterx = 13, filtery = 13, verbose_mode = F,
+                    wd = temp_dir)
+    
+str_cur_180m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_180m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+    # Structure 720m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_720m.tif'), 
+                    filterx = 49, filtery = 49)
+    
+str_cur_720m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_720m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+str_cur <- mean(c(str_cur_180m, str_cur_720m), na.rm = T)
+
+fr_e01c <- mean(c(str_cur, large_td, ht_eco50), na.rm = T)
+
+     #vegetation composition element:
+fr_e02c <- mean(c(evenness, seral_stage), na.rm = T)
+
+     #disturbance element
+DRID_eco75 <- crop(DRID_eco75, TCSI_forest)
+
+dd_eco75 <- crop(dd_eco75, TCSI_forest)
+
+z_drid_soe <- terra::zonal(x = DRID_eco75, 
+                               z = huc_12b, 
+                               fun = mean, na.rm = T)
+z_drid_soe[, 2] <- ifelse(is.nan(z_drid_soe[, 2]), 0, z_drid_soe[, 2])
+z_drid_soe_d <- data.frame(from = z_drid_soe[, 1], 
+                               to = z_drid_soe[, 2])
+drid_huc12_cur <- terra::classify(x = huc_12b, 
+                                      rcl = as.matrix(z_drid_soe_d))
+drid_huc12_cur <- terra::app(drid_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.9793946, -0.6547840), scores = c(-1, 1)))
+
+    # Zonal stats for Delinq
+z_delinq_soe <- terra::zonal(x = dd_eco75, 
+                                 z = huc_12b, 
+                                 fun = mean, na.rm = T)
+z_delinq_soe[, 2] <- ifelse(is.nan(z_delinq_soe[, 2]), 0, z_delinq_soe[, 2])
+z_delinq_soe_d <- data.frame(from = z_delinq_soe[, 1], 
+                                 to = z_delinq_soe[, 2])
+delinq_huc12_cur <- terra::classify(x = huc_12b, 
+                                        rcl = as.matrix(z_delinq_soe_d))
+delinq_huc12_cur <- terra::app(delinq_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.3989963, 0.5574752), scores = c(-1, 1)))
+
+    # COMBINE METRICS --> DISTURBANCE ELEMENT
+ dist_cur1 <- mean(c(DRID_eco75, dd_eco75), na.rm = T)
+ dist_cur2 <- mean(c(drid_huc12_cur, delinq_huc12_cur), na.rm = T)
+ fr_e03c <- mean(c(dist_cur1, dist_cur2), na.rm = T)
+ 
+     #final forest resilience score:
+fr_eco75 <- mean(c(fr_e01c, fr_e02c, fr_e03c), na.rm = T)
+zonal(fr_eco75, TCSI_forest, "mean", na.rm=T)
+
+
+#fire50 scenario score:
+     #forest structure element
+basal_area <- project(ba_fire50, TCSI_forest, method = 'near')
+
+tree_density <- project(td_fire50, basal_area, method = 'near')
+
+str_cur_15m <- AND(c(tree_density, basal_area))
+
+str_cur_15m_01 <- ifel(str_cur_15m == 1, 1, 0)
+writeRaster(str_cur_15m_01, filename = paste0(temp_dir, '/str_cur_15m_01.tif'), overwrite = T)
+
+    # Structure 180m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_180m.tif'), 
+                    filterx = 13, filtery = 13, verbose_mode = F,
+                    wd = temp_dir)
+    
+str_cur_180m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_180m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+    # Structure 720m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_720m.tif'), 
+                    filterx = 49, filtery = 49)
+    
+str_cur_720m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_720m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+str_cur <- mean(c(str_cur_180m, str_cur_720m), na.rm = T)
+
+fr_e01c <- mean(c(str_cur, large_td, ht), na.rm = T)
+
+     #vegetation composition element:
+fr_e02c <- mean(c(evenness, seral_stage), na.rm = T)
+
+     #disturbance element
+DRID_fire50 <- crop(DRID_fire50, TCSI_forest)
+
+dd_fire50 <- crop(dd_fire50, TCSI_forest)
+
+z_drid_soe <- terra::zonal(x = DRID_fire50, 
+                               z = huc_12b, 
+                               fun = mean, na.rm = T)
+z_drid_soe[, 2] <- ifelse(is.nan(z_drid_soe[, 2]), 0, z_drid_soe[, 2])
+z_drid_soe_d <- data.frame(from = z_drid_soe[, 1], 
+                               to = z_drid_soe[, 2])
+drid_huc12_cur <- terra::classify(x = huc_12b, 
+                                      rcl = as.matrix(z_drid_soe_d))
+drid_huc12_cur <- terra::app(drid_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.9793946, -0.6547840), scores = c(-1, 1)))
+
+    # Zonal stats for Delinq
+z_delinq_soe <- terra::zonal(x = dd_fire50, 
+                                 z = huc_12b, 
+                                 fun = mean, na.rm = T)
+z_delinq_soe[, 2] <- ifelse(is.nan(z_delinq_soe[, 2]), 0, z_delinq_soe[, 2])
+z_delinq_soe_d <- data.frame(from = z_delinq_soe[, 1], 
+                                 to = z_delinq_soe[, 2])
+delinq_huc12_cur <- terra::classify(x = huc_12b, 
+                                        rcl = as.matrix(z_delinq_soe_d))
+delinq_huc12_cur <- terra::app(delinq_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.3989963, 0.5574752), scores = c(-1, 1)))
+
+    # COMBINE METRICS --> DISTURBANCE ELEMENT
+ dist_cur1 <- mean(c(DRID_fire50, dd_fire50), na.rm = T)
+ dist_cur2 <- mean(c(drid_huc12_cur, delinq_huc12_cur), na.rm = T)
+ fr_e03c <- mean(c(dist_cur1, dist_cur2), na.rm = T)
+ 
+     #final forest resilience score:
+fr_fire50 <- mean(c(fr_e01c, fr_e02c, fr_e03c), na.rm = T)
+zonal(fr_fire50, TCSI_forest, "mean", na.rm=T)
+
+
+#fire75 scenario score:
+     #forest structure element
+basal_area <- project(ba_fire75, TCSI_forest, method = 'near')
+
+tree_density <- project(td_fire75, basal_area, method = 'near')
+
+str_cur_15m <- AND(c(tree_density, basal_area))
+
+str_cur_15m_01 <- ifel(str_cur_15m == 1, 1, 0)
+writeRaster(str_cur_15m_01, filename = paste0(temp_dir, '/str_cur_15m_01.tif'), overwrite = T)
+
+    # Structure 180m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_180m.tif'), 
+                    filterx = 13, filtery = 13, verbose_mode = F,
+                    wd = temp_dir)
+    
+str_cur_180m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_180m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+    # Structure 720m
+wbt_mean_filter(input = paste0(temp_dir, '/str_cur_15m_01.tif'), 
+                    output = paste0(temp_dir, '/str_cur_15m_01_720m.tif'), 
+                    filterx = 49, filtery = 49)
+    
+str_cur_720m <- rescale.range(x = rast(paste0(temp_dir, '/str_cur_15m_01_720m.tif')),
+                                  orig.min = 0, orig.max = 1,
+                                  new.min = -1, new.max = 1)
+    
+str_cur <- mean(c(str_cur_180m, str_cur_720m), na.rm = T)
+
+fr_e01c <- mean(c(str_cur, large_td, ht), na.rm = T)
+
+     #vegetation composition element:
+fr_e02c <- mean(c(evenness, seral_stage), na.rm = T)
+
+     #disturbance element
+DRID_fire75 <- crop(DRID_fire75, TCSI_forest)
+
+dd_fire75 <- crop(dd_fire75, TCSI_forest)
+
+z_drid_soe <- terra::zonal(x = DRID_fire75, 
+                               z = huc_12b, 
+                               fun = mean, na.rm = T)
+z_drid_soe[, 2] <- ifelse(is.nan(z_drid_soe[, 2]), 0, z_drid_soe[, 2])
+z_drid_soe_d <- data.frame(from = z_drid_soe[, 1], 
+                               to = z_drid_soe[, 2])
+drid_huc12_cur <- terra::classify(x = huc_12b, 
+                                      rcl = as.matrix(z_drid_soe_d))
+drid_huc12_cur <- terra::app(drid_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.9793946, -0.6547840), scores = c(-1, 1)))
+
+    # Zonal stats for Delinq
+z_delinq_soe <- terra::zonal(x = dd_fire75, 
+                                 z = huc_12b, 
+                                 fun = mean, na.rm = T)
+z_delinq_soe[, 2] <- ifelse(is.nan(z_delinq_soe[, 2]), 0, z_delinq_soe[, 2])
+z_delinq_soe_d <- data.frame(from = z_delinq_soe[, 1], 
+                                 to = z_delinq_soe[, 2])
+delinq_huc12_cur <- terra::classify(x = huc_12b, 
+                                        rcl = as.matrix(z_delinq_soe_d))
+delinq_huc12_cur <- terra::app(delinq_huc12_cur, function(i) departure_func_terra(i, breaks = c(-0.3989963, 0.5574752), scores = c(-1, 1)))
+
+    # COMBINE METRICS --> DISTURBANCE ELEMENT
+ dist_cur1 <- mean(c(DRID_fire50, dd_fire75), na.rm = T)
+ dist_cur2 <- mean(c(drid_huc12_cur, delinq_huc12_cur), na.rm = T)
+ fr_e03c <- mean(c(dist_cur1, dist_cur2), na.rm = T)
+ 
+     #final forest resilience score:
+fr_fire75 <- mean(c(fr_e01c, fr_e02c, fr_e03c), na.rm = T)
+zonal(fr_fire75, TCSI_forest, "mean", na.rm=T)
+```
+
+#Fire dynamics pillar scores:
+```{r}
+prop_dist <- rast(paste0(dir, "fire as disturbance current score.tif")) #this is the 'Fire as disturbance' metric, which was not correlated with the important metrics and therefore not updated.
+prop_dist <- project(prop_dist, TCSI_forest, method = 'near')
+
+#pretreatment score:
+huc_12b <- terra::project(x = HUC12, y = TCSI_forest, method = 'near')
+prop_hsf <- raster::zonal(x = hsf_prob, 
+                              z = huc_12b, 
+                              fun = mean, na.rm = T)
+hsf_patch <- project(hsf_patch, hsf_prob, method = 'near')
+fd_e02 <- AND(c(hsf_prob, hsf_patch))
+
+fd <- mean(c(prop_dist, fd_e02), na.rm = T)
+fac <- mask(fac_lsp, fac_mask)
+plot(fac)
+fire_pillar <- ifel(is.na(fac), fd, fac)
+zonal(fire_pillar, TCSI_forest, "mean", na.rm=T) #
+
+
+#eco50 scenario score:
+hsf_prob <- hsf_prob_eco50
+huc_12b <- terra::project(x = HUC12, y = TCSI_forest, method = 'near')
+prop_hsf <- raster::zonal(x = hsf_prob, 
+                              z = huc_12b, 
+                              fun = mean, na.rm = T)
+hsf_patch <- hsf_patch_eco50
+hsf_patch <- project(hsf_patch, hsf_prob, method = 'near')
+fd_e02 <- AND(c(hsf_prob, hsf_patch))
+
+fd <- mean(c(prop_dist, fd_e02), na.rm = T)
+fac <- mask(fac_lsp_eco50, fac_mask)
+fire_pillar_eco50 <- ifel(is.na(fac), fd, fac)
+zonal(fire_pillar_eco50, TCSI_forest, "mean", na.rm=T) #0.36
+
+#eco75 scenario score:
+hsf_prob <- hsf_prob_eco75
+huc_12b <- terra::project(x = HUC12, y = TCSI_forest, method = 'near')
+prop_hsf <- raster::zonal(x = hsf_prob, 
+                              z = huc_12b, 
+                              fun = mean, na.rm = T)
+hsf_patch <- hsf_patch_eco75
+hsf_patch <- project(hsf_patch, hsf_prob, method = 'near')
+fd_e02 <- AND(c(hsf_prob, hsf_patch))
+
+fd <- mean(c(prop_dist, fd_e02), na.rm = T)
+fac <- mask(fac_lsp_eco75, fac_mask)
+fire_pillar_eco75 <- ifel(is.na(fac), fd, fac)
+zonal(fire_pillar_eco75, TCSI_forest, "mean", na.rm=T) #0.45
+
+
+#fire50 scenario score:
+hsf_prob <- hsf_prob_fire50
+huc_12b <- terra::project(x = HUC12, y = TCSI_forest, method = 'near')
+prop_hsf <- raster::zonal(x = hsf_prob, 
+                              z = huc_12b, 
+                              fun = mean, na.rm = T)
+hsf_patch <- hsf_patch_fire50
+hsf_patch <- project(hsf_patch, hsf_prob, method = 'near')
+fd_e02 <- AND(c(hsf_prob, hsf_patch))
+
+fd <- mean(c(prop_dist, fd_e02), na.rm = T) 
+
+fac <- mask(fac_lsp_fire50, fac_mask)
+fire_pillar_fire50 <- ifel(is.na(fac), fd, fac)
+zonal(fire_pillar_fire50, TCSI_forest, "mean", na.rm=T) #0.24
+
+#fire75 scenario score:
+hsf_prob <- hsf_prob_fire75
+huc_12b <- terra::project(x = HUC12, y = TCSI_forest, method = 'near')
+prop_hsf <- raster::zonal(x = hsf_prob, 
+                              z = huc_12b, 
+                              fun = mean, na.rm = T)
+hsf_patch <- hsf_patch_fire75
+hsf_patch <- project(hsf_patch, hsf_prob, method = 'near')
+fd_e02 <- AND(c(hsf_prob, hsf_patch))
+
+fd <- mean(c(prop_dist, fd_e02), na.rm = T)
+
+fac <- mask(fac_lsp_fire75, fac_mask)
+fire_pillar_fire75 <- ifel(is.na(fac), fd, fac)
+zonal(fire_pillar_fire75, TCSI_forest, "mean", na.rm=T) #0.42
+
+```
+
+#Biodiversity conservation pillar scores:
+#Calculating the means per element, and per the bio pillar:
+```{r}
+#calculating the element scores by averaging the metric scores, for each elememt:
+bio_metric_scores <- "~/"
+element <- "func richness" #the elements are "richness", "cso" and "func richness"
+
+run <- "eco50" #eco50, eco75, fire50, fire75, pretreatment
+
+files <- rast(list.files(paste0(bio_metric_scores, element, "/"), pattern=glob2rx(paste0(run,"*tif")) ,full.name=T))
+element_r <- mean(files, na.rm = T)
+
+element_dir <- paste0("~/", element, "/element score/")
+writeRaster(element_r, paste0(element_dir, element, "_", run, ".tif"), overwrite=T, datatype='INT1S')
+
+#Calculating the pillar score, by averaging the three element scores:
+dir_bscores <- "~/"
+
+run <- "eco50" #eco50, eco75, fire50, fire75, pretreatment
+
+func_ele <- rast(paste0(dir_bscores, "func richness/element score/func richness_" ,run, ".tif"))
+rich_ele <- rast(paste0(dir_bscores, "richness/element score/richness_" ,run, ".tif"))
+cso_ele <- rast(paste0(dir_bscores, "cso/CSO_" ,run, "_current.tif"))
+
+bio_pillar <- mean(c(func_ele, rich_ele, cso_ele), na.rm = T) #calculating the biodiversity pillar score
+
+writeRaster(bio_pillar, paste0(dir_bscores, "pillar score/", run, "_bio_pillar_score.tif"), overwrite=T, datatype='INT1S')
+
+#here are the outputs of this chunk of code:
+bio_pillar <- rast(paste0(dir,"pretreatment_bio_pillar_score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+bio_pillar_eco50 <- rast(paste0(dir,"eco50_bio_pillar_score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+bio_pillar_eco75 <- rast(paste0(dir,"eco75_bio_pillar_score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+bio_pillar_fire50 <- rast(paste0(dir,"fire50_bio_pillar_score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+bio_pillar_fire75 <- rast(paste0(dir,"fire75_bio_pillar_score.tif")) %>%
+  terra::project(TCSI_boundary, method = "near") %>%
+  terra::crop(TCSI_boundary)
+
+
+#pretreatment score:
+zonal(bio_pillar, TCSI_forest, "mean", na.rm=T)
+
+#eco50 scenario score:
+zonal(bio_pillar_eco50, TCSI_forest, "mean", na.rm=T)
+
+#eco75 scenario score:
+zonal(bio_pillar_eco75, TCSI_forest, "mean", na.rm=T)
+
+#fire50 scenario score:
+zonal(bio_pillar_fire50, TCSI_forest, "mean", na.rm=T)
+
+#fire75 scenario score:
+zonal(bio_pillar_fire75, TCSI_forest, "mean", na.rm=T)
+```
+
+#Ecosystem outcome scores:
+```{r}
+#pretreatment score:
+eco_score <- mean(c(fire_pillar, fr, bio_pillar, carbonstability), na.rm = T) #the ecosystem outcome score
+zonal(eco_score, TCSI_forest, "mean", na.rm=T)
+
+#eco50 scenario score:
+eco_score_eco50 <- mean(c(fire_pillar_eco50, fr_eco50, bio_pillar_eco50, carbonstability_eco50), na.rm = T) #the ecosystem outcome score
+zonal(eco_score_eco50, TCSI_forest, "mean", na.rm=T)
+
+#eco75 scenario score:
+eco_score_eco75 <- mean(c(fire_pillar_eco75, fr_eco75, bio_pillar_eco75, carbonstability_eco75), na.rm = T) #the ecosystem outcome score
+zonal(eco_score_eco75, TCSI_forest, "mean", na.rm=T)
+
+
+#fire50 scenario score:
+eco_score_fire50 <- mean(c(fire_pillar_fire50, fr_fire50, bio_pillar_fire50, carbonstability_fire50), na.rm = T) #the ecosystem outcome score
+zonal(eco_score_fire50, TCSI_forest, "mean", na.rm=T)
+
+#fire75 scenario score:
+eco_score_fire75 <- mean(c(fire_pillar_fire75, fr_fire75, bio_pillar_fire75, carbonstability_fire75), na.rm = T) #the ecosystem outcome score
+zonal(eco_score_fire75, TCSI_forest, "mean", na.rm=T)
+```
+
+#Figure 5: Spatial distribution of benefits
+```{r}
+###eco###
+
+#current layer:
+current_eco <- mask(eco_score, TCSI_forest)
+
+eco50score <- mask(eco_score_eco50, TCSI_forest) 
+
+eco75score <- mask(eco_score_eco75, TCSI_forest)
+
+HUC12 <- mask(HUC12, TCSI_forest) #masking HUC12 by forest and urban
+HUC12 <- mask(HUC12, urban)
+
+#mapping:
+current_ecoH <- zonal(current_eco, HUC12, "mean", as.raster = TRUE, na.rm=TRUE) #to create the map
+    plot(current_ecoH, breaks = seq(-1, 1, 0.25), col = hcl.colors(n = 8, palette = "Zissou 1", rev = T), axes = F)
+
+eco50H <- zonal(eco50score, HUC12, "mean", as.raster = TRUE, na.rm=TRUE) #to create the map
+    plot(eco50H, breaks = seq(-1, 1, 0.25), col = hcl.colors(n = 8, palette = "Zissou 1", rev = T), axes = F)
+
+eco75H <- zonal(eco75score, HUC12, "mean", as.raster = TRUE, na.rm=TRUE) #to create the map
+    plot(eco75H, breaks = seq(-1, 1, 0.25), col = hcl.colors(n = 8, palette = "Zissou 1", rev = T), axes = F)
+
+###fire###
+PODS <- mask(PODS, TCSI_forest) #masking PODS by forest and urban
+PODS <- mask(PODS, urban)
+
+current_fire <- mask(fac_lsp, TCSI_forest)
+
+fire50score <- mask(fac_lsp_fire50, TCSI_forest)
+
+fire75score <- mask(fac_lsp_fire75, TCSI_forest)
+
+#mapping:
+current_fireH <- zonal(current_fire, PODS, "mean", as.raster = TRUE, na.rm=TRUE) #to create the map
+    plot(current_fireH, breaks = seq(-1, 1, 0.25), col = hcl.colors(n = 8, palette = "Zissou 1", rev = T), axes = F)
+
+fire50P <- zonal(fire50score, PODS, "mean", as.raster = TRUE, na.rm=TRUE)
+
+    plot(fire50P, breaks = seq(-1, 1, 0.25), col = hcl.colors(n = 8, palette = "Zissou 1", rev = T), axes = F)
+
+fire75P <- zonal(fire75score, PODS, "mean", as.raster = TRUE, na.rm=TRUE)
+    plot(fire75P, breaks = seq(-1, 1, 0.25), col = hcl.colors(n = 8, palette = "Zissou 1", rev = T), axes = F)
+
+```
+
+#creating metadata for the raster layers used in this code:
+```{r}
+dir <- "~/" #set directory where the data layers are located
+
+files <- list.files(dir, pattern = "\\.tif$", full.names = TRUE)
+files
+
+extract_metadata <- function(files) {
+  r <- rast(files)
+  metadata <- data.frame(
+    Raster_Name = basename(files),
+    Dimenstions = c(nrow(r), ncol(r), nlyr(r)),
+    Columns = ncol(r),
+    Rows = nrow(r),
+    Cell_Size_X = res(r)[1],
+    Cell_Size_Y = res(r)[2],
+    Coordinate_System = paste0(" ", as.character(crs(r, proj = TRUE))),
+    Extent = paste(round(ext(r), digits = 1), collapse = ", "),
+    Min_value = paste(round(minmax(r)[1, ],digits = 1), collapse = ", "),
+    Max_Value = paste(round(minmax(r)[2, ], digits = 1), collapse = ", "),
+    stringsAsFactors = FALSE
+  )
+  return(metadata)
+}
+
+metadata_df <- do.call(rbind, lapply(files, extract_metadata))
+metadata_df
+
+write.csv(metadata_df, paste0(dir, "raster_metadata.csv"))
+
+```
